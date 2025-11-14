@@ -87,6 +87,8 @@ class EnhancedTunisieAnnonceScraper {
       if (metadata && metadata.cod_ann) {
         this.watermark = metadata.cod_ann;
         console.log(`✓ Loaded watermark: ${this.watermark}`);
+      } else {
+        console.log(`✓ No watermark found (first run)`);
       }
     } catch (error) {
       console.error(`Error loading watermark: ${error.message}`);
@@ -97,17 +99,20 @@ class EnhancedTunisieAnnonceScraper {
    * Save the watermark to metadata collection
    */
   async saveWatermark(codAnn) {
-    if (!this.db || !codAnn) return;
+    if (!this.db || !codAnn) {
+      console.log(`⚠ Cannot save watermark: db=${!!this.db}, codAnn=${codAnn}`);
+      return;
+    }
     
     try {
-      await this.db
+      const result = await this.db
         .collection('scrape_metadata')
         .updateOne(
           { key: 'last_watermark' },
           { $set: { cod_ann: codAnn, updated_at: new Date() } },
           { upsert: true }
         );
-      console.log(`✓ Saved watermark: ${codAnn}`);
+      console.log(`✓ Saved watermark: ${codAnn} (upserted: ${result.upsertedId ? 'yes' : 'no'})`);
     } catch (error) {
       console.error(`Error saving watermark: ${error.message}`);
     }
@@ -160,6 +165,10 @@ class EnhancedTunisieAnnonceScraper {
       let codAnn = null;
       if (link.includes('cod_ann=')) {
         codAnn = link.split('cod_ann=')[1].split('&')[0];
+        // Ensure codAnn is not empty
+        if (!codAnn || codAnn.trim() === '') {
+          codAnn = null;
+        }
       }
       
       return {
@@ -355,6 +364,7 @@ class EnhancedTunisieAnnonceScraper {
     try {
       const codAnn = listing.cod_ann;
       if (!codAnn) {
+        console.log(`    ✗ Cannot save listing without cod_ann`);
         return false;
       }
 
@@ -412,10 +422,17 @@ class EnhancedTunisieAnnonceScraper {
       const row = rows[i];
       const listing = this.parseListing(row, $);
       
-      if (listing) {
+      if (listing && listing.cod_ann) {  // Only process listings with valid cod_ann
+        // Debug: log cod_ann
+        if (count < 3 || (this.watermark && listing.cod_ann === this.watermark)) {
+          const match = this.watermark && listing.cod_ann === this.watermark;
+          const matchChar = match ? '✓ MATCH' : '        ';
+          console.log(`    [${matchChar}] cod_ann: ${listing.cod_ann}, watermark: ${this.watermark}`);
+        }
+        
         // Check if we hit the watermark
         if (this.watermark && listing.cod_ann === this.watermark) {
-          console.log(`  ⚠ Reached watermark: ${this.watermark}. Stopping scrape.`);
+          console.log(`\n  ⚠ Reached watermark: ${this.watermark}. Stopping scrape.\n`);
           hitWatermark = true;
           break;
         }
@@ -423,6 +440,7 @@ class EnhancedTunisieAnnonceScraper {
         // Track first listing of this scrape
         if (count === 0) {
           this.newFirstListing = listing.cod_ann;
+          console.log(`  → First listing cod_ann: ${this.newFirstListing}`);
         }
         
         this.listings.push(listing);
@@ -460,10 +478,13 @@ class EnhancedTunisieAnnonceScraper {
     console.log(`\nStarting scrape of latest ${numPages} pages...`);
     if (this.watermark) {
       console.log(`Current watermark: ${this.watermark}`);
+    } else {
+      console.log('No watermark set (first run)');
     }
     
     let page = 1;
     let totalCount = 0;
+    let watermarkFound = false;
     
     while (page <= numPages) {
       console.log(`\n${'='.repeat(60)}`);
@@ -483,6 +504,7 @@ class EnhancedTunisieAnnonceScraper {
       
       if (hitWatermark) {
         console.log('Watermark reached. Stopping scrape.');
+        watermarkFound = true;
         break;
       }
       
@@ -490,12 +512,14 @@ class EnhancedTunisieAnnonceScraper {
       await this.sleep(1000); // Wait between pages
     }
     
-    // Update watermark with first listing of this scrape
-    if (this.newFirstListing) {
+    // Update watermark with first listing of this scrape (only if we found new content)
+    if (this.newFirstListing && (totalCount > 0 || !watermarkFound)) {
       await this.saveWatermark(this.newFirstListing);
+      console.log(`Watermark updated to: ${this.newFirstListing}`);
     }
     
     console.log(`\nTotal new listings scraped: ${totalCount}`);
+    console.log(`Watermark found during scrape: ${watermarkFound ? 'yes' : 'no'}`);
     return totalCount;
   }
 
