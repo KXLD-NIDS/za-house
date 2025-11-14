@@ -1,6 +1,7 @@
 /**
  * Enhanced Web Scraper for tunisie-annonce.com
- * Extracts real estate listings, follows links, and saves HTML to MongoDB
+ * Extracts real estate listings, parses phone numbers and images from HTML,
+ * then discards the HTML (saves only parsed data to MongoDB)
  */
 
 const axios = require('axios');
@@ -353,46 +354,45 @@ class EnhancedTunisieAnnonceScraper {
   }
 
   /**
-   * Save listing and its HTML to MongoDB
-   */
-  async saveListingToMongoDB(listing, html) {
-    if (!this.db) {
-      return false;
-    }
+    * Save listing to MongoDB (extracted data only, no HTML)
+    */
+   async saveListingToMongoDB(listing, html) {
+     if (!this.db) {
+       return false;
+     }
 
-    try {
-      const codAnn = listing.cod_ann;
-      if (!codAnn) {
-        console.log(`    ✗ Cannot save listing without cod_ann`);
-        return false;
-      }
+     try {
+       const codAnn = listing.cod_ann;
+       if (!codAnn) {
+         console.log(`    ✗ Cannot save listing without cod_ann`);
+         return false;
+       }
 
-      // Extract phone numbers and images from HTML
-      const phoneNumbers = this.extractPhoneNumbers(html);
-      const imageUrls = this.extractImageUrls(html);
+       // Extract phone numbers and images from HTML
+       const phoneNumbers = this.extractPhoneNumbers(html);
+       const imageUrls = this.extractImageUrls(html);
 
-      const listingWithHtml = {
-        ...listing,
-        html,
-        phone_numbers: phoneNumbers,
-        image_urls: imageUrls,
-        image_count: imageUrls.length,
-        phone_count: phoneNumbers.length,
-        saved_date: new Date()
-      };
+       const listingWithParsedData = {
+         ...listing,
+         phone_numbers: phoneNumbers,
+         image_urls: imageUrls,
+         image_count: imageUrls.length,
+         phone_count: phoneNumbers.length,
+         saved_date: new Date()
+       };
 
-      await this.db.collection('listing_details').updateOne(
-        { cod_ann: codAnn },
-        { $set: listingWithHtml },
-        { upsert: true }
-      );
-      
-      return true;
-    } catch (error) {
-      console.error(`Error saving to MongoDB: ${error.message}`);
-      return false;
-    }
-  }
+       await this.db.collection('listing_details').updateOne(
+         { cod_ann: codAnn },
+         { $set: listingWithParsedData },
+         { upsert: true }
+       );
+       
+       return true;
+     } catch (error) {
+       console.error(`Error saving to MongoDB: ${error.message}`);
+       return false;
+     }
+   }
 
   /**
    * Sleep for specified milliseconds
