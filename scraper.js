@@ -21,6 +21,8 @@ class EnhancedTunisieAnnonceScraper {
     this.listings = [];
     this.client = null;
     this.db = null;
+    this.watermark = null; // Track the last scraped listing (cod_ann)
+    this.newFirstListing = null; // Track first listing of current scrape
     
     // Axios instance with headers
     this.axiosInstance = axios.create({
@@ -32,8 +34,8 @@ class EnhancedTunisieAnnonceScraper {
   }
 
   /**
-   * Initialize MongoDB connection
-   */
+    * Initialize MongoDB connection
+    */
   async initMongoDB() {
     try {
       this.client = new MongoClient(this.mongoUri, {
@@ -54,11 +56,60 @@ class EnhancedTunisieAnnonceScraper {
         await this.db.createCollection('listing_details');
       }
       
+      if (!collectionNames.includes('scrape_metadata')) {
+        await this.db.createCollection('scrape_metadata');
+      }
+      
       await this.db.collection('listing_details').createIndex({ cod_ann: 1 });
+      await this.db.collection('scrape_metadata').createIndex({ key: 1 });
+      
+      // Load watermark from metadata
+      await this.loadWatermark();
+      
       return true;
     } catch (error) {
       console.log(`✗ Warning: MongoDB not available. Will save to JSON/CSV only.`);
       return false;
+    }
+  }
+
+  /**
+   * Load the watermark from metadata collection
+   */
+  async loadWatermark() {
+    if (!this.db) return;
+    
+    try {
+      const metadata = await this.db
+        .collection('scrape_metadata')
+        .findOne({ key: 'last_watermark' });
+      
+      if (metadata && metadata.cod_ann) {
+        this.watermark = metadata.cod_ann;
+        console.log(`✓ Loaded watermark: ${this.watermark}`);
+      }
+    } catch (error) {
+      console.error(`Error loading watermark: ${error.message}`);
+    }
+  }
+
+  /**
+   * Save the watermark to metadata collection
+   */
+  async saveWatermark(codAnn) {
+    if (!this.db || !codAnn) return;
+    
+    try {
+      await this.db
+        .collection('scrape_metadata')
+        .updateOne(
+          { key: 'last_watermark' },
+          { $set: { cod_ann: codAnn, updated_at: new Date() } },
+          { upsert: true }
+        );
+      console.log(`✓ Saved watermark: ${codAnn}`);
+    } catch (error) {
+      console.error(`Error saving watermark: ${error.message}`);
     }
   }
 
@@ -342,24 +393,38 @@ class EnhancedTunisieAnnonceScraper {
   }
 
   /**
-   * Scrape all listings from a single page and fetch their details
-   */
+    * Scrape all listings from a single page and fetch their details
+    * Stops at watermark if reached
+    */
   async scrapePage(pageNum = 1) {
     const html = await this.fetchPage(pageNum);
     if (!html) {
-      return 0;
+      return { count: 0, hitWatermark: false };
     }
 
     const $ = cheerio.load(html);
     const rows = $('tr.Tableau1');
     
     let count = 0;
+    let hitWatermark = false;
     
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       const listing = this.parseListing(row, $);
       
       if (listing) {
+        // Check if we hit the watermark
+        if (this.watermark && listing.cod_ann === this.watermark) {
+          console.log(`  ⚠ Reached watermark: ${this.watermark}. Stopping scrape.`);
+          hitWatermark = true;
+          break;
+        }
+        
+        // Track first listing of this scrape
+        if (count === 0) {
+          this.newFirstListing = listing.cod_ann;
+        }
+        
         this.listings.push(listing);
         
         const link = listing.link;
@@ -385,30 +450,53 @@ class EnhancedTunisieAnnonceScraper {
       }
     }
     
-    return count;
+    return { count, hitWatermark };
   }
 
   /**
-   * Scrape multiple pages
-   */
-  async scrapeMultiplePages(numPages = Infinity) {
+    * Scrape latest 5 pages (or until watermark is reached)
+    */
+  async scrapeMultiplePages(numPages = 5) {
+    console.log(`\nStarting scrape of latest ${numPages} pages...`);
+    if (this.watermark) {
+      console.log(`Current watermark: ${this.watermark}`);
+    }
+    
     let page = 1;
+    let totalCount = 0;
+    
     while (page <= numPages) {
       console.log(`\n${'='.repeat(60)}`);
       console.log(`Scraping page ${page}...`);
       console.log(`${'='.repeat(60)}`);
       
-      const count = await this.scrapePage(page);
-      console.log(`Found ${count} listings on page ${page}`);
+      const result = await this.scrapePage(page);
+      const { count, hitWatermark } = result;
+      
+      console.log(`Found ${count} new listings on page ${page}`);
+      totalCount += count;
       
       if (count === 0) {
         console.log('No more listings found. Stopping.');
         break;
       }
       
+      if (hitWatermark) {
+        console.log('Watermark reached. Stopping scrape.');
+        break;
+      }
+      
       page++;
       await this.sleep(1000); // Wait between pages
     }
+    
+    // Update watermark with first listing of this scrape
+    if (this.newFirstListing) {
+      await this.saveWatermark(this.newFirstListing);
+    }
+    
+    console.log(`\nTotal new listings scraped: ${totalCount}`);
+    return totalCount;
   }
 
   /**
@@ -464,12 +552,14 @@ class EnhancedTunisieAnnonceScraper {
   }
 
   /**
-   * Get summary statistics
-   */
+    * Get summary statistics
+    */
   async getSummary() {
     const summary = {
       total_listings: this.listings.length,
       mongodb_saved: 0,
+      current_watermark: this.watermark,
+      new_first_listing: this.newFirstListing,
       by_nature: {},
       by_type: {},
       by_location: {},
@@ -560,26 +650,30 @@ async function main() {
     await scraper.saveToCSV('tunisie_listings.csv');
 
     // Print summary
-    const summary = await scraper.getSummary();
-    console.log(`\n${'='.repeat(60)}`);
-    console.log('=== Summary ===');
-    console.log(`${'='.repeat(60)}`);
-    console.log(`Total listings scraped: ${summary.total_listings}`);
-    console.log(`Saved to MongoDB: ${summary.mongodb_saved}`);
-    console.log(`Professional listings: ${summary.professional_count}`);
-    console.log(`Listings with photos: ${summary.with_photo_count}`);
-    console.log(`Total phone numbers found: ${summary.total_phones}`);
-    console.log(`Total images found: ${summary.total_images}`);
-    
-    console.log('\nBy Nature:');
-    for (const [nature, count] of Object.entries(summary.by_nature)) {
-      console.log(`  ${nature}: ${count}`);
-    }
-    
-    console.log('\nTop 10 Locations:');
-    for (const [location, count] of Object.entries(summary.by_location)) {
-      console.log(`  ${location}: ${count}`);
-    }
+     const summary = await scraper.getSummary();
+     console.log(`\n${'='.repeat(60)}`);
+     console.log('=== Summary ===');
+     console.log(`${'='.repeat(60)}`);
+     console.log(`Total listings scraped: ${summary.total_listings}`);
+     console.log(`Saved to MongoDB: ${summary.mongodb_saved}`);
+     console.log(`Professional listings: ${summary.professional_count}`);
+     console.log(`Listings with photos: ${summary.with_photo_count}`);
+     console.log(`Total phone numbers found: ${summary.total_phones}`);
+     console.log(`Total images found: ${summary.total_images}`);
+     
+     console.log('\n=== Watermark Info ===');
+     console.log(`Previous watermark: ${summary.current_watermark || 'None (first run)'}`);
+     console.log(`New watermark: ${summary.new_first_listing || 'N/A'}`);
+     
+     console.log('\nBy Nature:');
+     for (const [nature, count] of Object.entries(summary.by_nature)) {
+       console.log(`  ${nature}: ${count}`);
+     }
+     
+     console.log('\nTop 10 Locations:');
+     for (const [location, count] of Object.entries(summary.by_location)) {
+       console.log(`  ${location}: ${count}`);
+     }
   } catch (error) {
     console.error('Error:', error);
   } finally {
