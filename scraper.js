@@ -21,8 +21,7 @@ class EnhancedTunisieAnnonceScraper {
     this.listings = [];
     this.client = null;
     this.db = null;
-    this.watermark = null; // Track the last scraped listing (cod_ann)
-    this.newFirstListing = null; // Track first listing of current scrape
+    this.watermark = null; // Track the watermark listing (cod_ann)
     
     // Axios instance with headers
     this.axiosInstance = axios.create({
@@ -437,12 +436,6 @@ class EnhancedTunisieAnnonceScraper {
           break;
         }
         
-        // Track first listing of this scrape
-        if (count === 0) {
-          this.newFirstListing = listing.cod_ann;
-          console.log(`  → First listing cod_ann: ${this.newFirstListing}`);
-        }
-        
         this.listings.push(listing);
         
         const link = listing.link;
@@ -485,6 +478,7 @@ class EnhancedTunisieAnnonceScraper {
     let page = 1;
     let totalCount = 0;
     let watermarkFound = false;
+    let firstListingOfSession = null; // Track FIRST listing of entire session
     
     while (page <= numPages) {
       console.log(`\n${'='.repeat(60)}`);
@@ -496,6 +490,12 @@ class EnhancedTunisieAnnonceScraper {
       
       console.log(`Found ${count} new listings on page ${page}`);
       totalCount += count;
+      
+      // Capture first listing of the entire session
+      if (firstListingOfSession === null && this.listings.length > 0) {
+        firstListingOfSession = this.listings[0].cod_ann;
+        console.log(`  ⭐ First listing of session: ${firstListingOfSession}`);
+      }
       
       if (count === 0) {
         console.log('No more listings found. Stopping.');
@@ -512,10 +512,10 @@ class EnhancedTunisieAnnonceScraper {
       await this.sleep(1000); // Wait between pages
     }
     
-    // Update watermark with first listing of this scrape (only if we found new content)
-    if (this.newFirstListing && (totalCount > 0 || !watermarkFound)) {
-      await this.saveWatermark(this.newFirstListing);
-      console.log(`Watermark updated to: ${this.newFirstListing}`);
+    // Update watermark with first listing of this scraping session
+    if (firstListingOfSession && totalCount > 0) {
+      await this.saveWatermark(firstListingOfSession);
+      console.log(`\n✓ Watermark updated to: ${firstListingOfSession}`);
     }
     
     console.log(`\nTotal new listings scraped: ${totalCount}`);
@@ -583,7 +583,6 @@ class EnhancedTunisieAnnonceScraper {
       total_listings: this.listings.length,
       mongodb_saved: 0,
       current_watermark: this.watermark,
-      new_first_listing: this.newFirstListing,
       by_nature: {},
       by_type: {},
       by_location: {},
@@ -686,8 +685,7 @@ async function main() {
      console.log(`Total images found: ${summary.total_images}`);
      
      console.log('\n=== Watermark Info ===');
-     console.log(`Previous watermark: ${summary.current_watermark || 'None (first run)'}`);
-     console.log(`New watermark: ${summary.new_first_listing || 'N/A'}`);
+     console.log(`Current watermark: ${summary.current_watermark || 'None (first run)'}`);
      
      console.log('\nBy Nature:');
      for (const [nature, count] of Object.entries(summary.by_nature)) {
